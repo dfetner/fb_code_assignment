@@ -3,6 +3,7 @@ from math import *
 import numpy as np
 from zipfile import ZipFile
 
+OGR2OGR = "C:\\OSGeo4W64\\bin\\ogr2ogr.exe"
 
 
 
@@ -44,9 +45,8 @@ def kml_to_json(kml):
     extension to avoid parsing/driver issues
     """
 
-    ogr2ogr = "C:\\OSGeo4W64\\bin\\ogr2ogr.exe"
     output_json = os.path.join(directory, ('{}.json').format(filename))
-    cmd = '{} -f "GeoJSON" {} {} -nln "{}"'.format(ogr2ogr, output_json, kml, filename)
+    cmd = '{} -f "GeoJSON" {} {} -nln "{}"'.format(OGR2OGR, output_json, kml, filename)
     os.system(cmd)
     return output_json
 
@@ -63,7 +63,7 @@ def extract_features(output_json):
     features = data['features']
     points = [f for f in features if f['geometry']['type'] == 'Point']
     [polylines] = [f for f in features if f['geometry']['type'] == 'LineString']
-    return points, polylines
+    return points, polylines, data
 
 
 def remove_temp_files(directory):
@@ -97,38 +97,38 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return bearing
 
 
-def find_excess_vertices(linestring):
+def find_excess_vertices(densified_linestring):
     """identifies excess vertices from polylines by comparing the bearing from
     each component vertex to the next vertex to that of the previous
     """
 
-    endpoint = max(linestring.keys())
+    endpoint = max(densified_linestring.keys())
     terminal_pts = [1, endpoint]
-    for i, vertex in linestring.iteritems():
+    for i, vertex in densified_linestring.iteritems():
         if i not in terminal_pts:
             lat1 = vertex['lat']
             lon1 = vertex['lon']
 
-            next_point = linestring[i + 1]
+            next_point = densified_linestring[i + 1]
             to_lat = next_point['lat']
             to_lon = next_point['lon']
             bearing1 = calculate_bearing(lat1, lon1, to_lat, to_lon)
             vertex['bearing1'] = bearing1
 
-            previous_point = linestring[i - 1]
+            previous_point = densified_linestring[i - 1]
             from_lat = previous_point['lat']
             from_lon = previous_point['lon']
             bearing2 = calculate_bearing(lat1, lon1, from_lat, from_lon)
             vertex['bearing2'] = bearing2
 
-    for i, vertex in linestring.iteritems():
+    for i, vertex in densified_linestring.iteritems():
         if i not in terminal_pts:
             try:
-                next_point = linestring[i + 1]
-                previous_point = linestring[i - 1]
+                next_point = densified_linestring[i + 1]
+                previous_point = densified_linestring[i - 1]
                 check1 = vertex['bearing1'] == next_point['bearing1'] == previous_point['bearing1']
                 check2 = vertex['bearing2'] == next_point['bearing2'] == previous_point['bearing2']
-                if (check1 and check2):
+                if (check1 and check2) and not vertex['HH']:
                     excess = True
                 else:
                     excess = False
@@ -204,7 +204,6 @@ def check_topology(linestring, points, tolerance=0):
             near2_lat = linestring[k2]['lat']
         point['properties']['Near2'] = {'vertex_id': k2, 'lon': near2_lon, 'lat': near2_lat}
 
-    print "{} of {} handholes coincident with existing route vertex".format(coincident_pts, handholes)
     if handholes != coincident_pts:
         valid_topology = False
     else:
@@ -269,6 +268,48 @@ def get_route_segments(densified_linestring):
     return route_segments
 
 
+def insert_polylines(route_segments, densified_linestring, polyline, data):
+    base_name = polyline['properties']['Name']
+    split_features = {'crs': data['crs'], 'type': data['type'], 'name': data['name'], 'features': []}
+    empty_line = {
+        'type': 'Feature',
+        'properties': {
+            'Name': None, 'extrude': 0,
+            'tessellate': -1, 'visibility': -1
+            },
+            'geometry': {
+                'type': 'LineString', 'coordinates': []
+                }
+            }
+
+    for k,v in route_segments.iteritems():
+        split_line = copy.deepcopy(empty_line)
+        split_line['properties']['Name'] = '{}{}'.format(base_name, k)
+
+        vertices = range(*v)
+        for v in vertices:
+            insert_pt = densified_linestring[v]
+            if not insert_pt['excess']:
+                lon = insert_pt['lon']
+                lat = insert_pt['lat']
+                xy = [lon, lat, 0]
+                split_line['geometry']['coordinates'].append(xy)
+        split_features['features'].append(split_line)
+    return split_features
+
+
+def export_kml(data, directory, filename):
+    split_name = '{}Split'.format(filename)
+    split_json = os.path.join(directory, '{}.geojson'.format(split_name))
+    f = open(split_json, 'w')
+    json.dump(data, f)
+    f.close()
+
+    split_kml = os.path.join(directory, '{}.kml'.format(split_name))
+    cmd = '{} -f "KML" {} {}'.format(OGR2OGR, split_kml, split_json)
+    os.system(cmd)
+
+
 if __name__ == '__main__':
     ge_file = 'C:\\Users\\duncan.fetner\\Desktop\\FB\\SS_SpanD_Data.kmz'
     extension, filename, directory, timestamp = get_file_properties(ge_file)
@@ -280,13 +321,19 @@ if __name__ == '__main__':
         print ("invalid file extension")
     
     output_json = kml_to_json(kml)
-    points, polyline = extract_features(output_json)
+    points, polyline, data = extract_features(output_json)
     remove_temp_files(directory)
 
     linestring = enumerate_linestring(polyline)
     valid_topology = check_topology(linestring, points)
     densified_linestring = insert_handholes(points, linestring)
     route_segments = get_route_segments(densified_linestring)
+    find_excess_vertices(densified_linestring)
+
+    split_features = insert_polylines(route_segments, densified_linestring, polyline, data)
+    export_kml(split_features, directory, filename)
+
+
 
 
 
