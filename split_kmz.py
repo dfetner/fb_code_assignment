@@ -1,7 +1,11 @@
-import collections, copy, json, os, shutil, time
+import json, os, shutil, time
+from copy import deepcopy
 from math import *
 import numpy as np
 from zipfile import ZipFile
+
+import geopy
+from geopy.distance import geodesic
 
 OGR2OGR = "C:\\OSGeo4W64\\bin\\ogr2ogr.exe"
 
@@ -212,7 +216,7 @@ def check_topology(linestring, points, tolerance=0):
 
 
 def insert_handholes(points, linestring):
-    densified_linestring = copy.deepcopy(linestring)
+    densified_linestring = deepcopy(linestring)
     for point in points:
         properties = point['properties']
         coords = point['geometry']['coordinates']
@@ -238,7 +242,7 @@ def insert_handholes(points, linestring):
 
             densified_linestring[high_id] = {
                 'HH': True, 'lon': coords[0], 'lat': coords[1]}
-            linestring = copy.deepcopy(densified_linestring)
+            linestring = deepcopy(densified_linestring)
 
     return densified_linestring
 
@@ -270,7 +274,7 @@ def get_route_segments(densified_linestring):
 
 def insert_polylines(route_segments, densified_linestring, polyline, data):
     base_name = polyline['properties']['Name']
-    split_features = {'crs': data['crs'], 'type': data['type'], 'name': data['name'], 'features': []}
+    modified_features = {'crs': data['crs'], 'type': data['type'], 'name': data['name'], 'features': []}
     empty_line = {
         'type': 'Feature',
         'properties': {
@@ -283,7 +287,7 @@ def insert_polylines(route_segments, densified_linestring, polyline, data):
             }
 
     for k,v in route_segments.iteritems():
-        split_line = copy.deepcopy(empty_line)
+        split_line = deepcopy(empty_line)
         split_line['properties']['Name'] = '{}{}'.format(base_name, k)
 
         vertices = range(*v)
@@ -294,20 +298,58 @@ def insert_polylines(route_segments, densified_linestring, polyline, data):
                 lat = insert_pt['lat']
                 xy = [lon, lat, 0]
                 split_line['geometry']['coordinates'].append(xy)
-        split_features['features'].append(split_line)
-    return split_features
+        modified_features['features'].append(split_line)
+    return modified_features
 
 
-def export_kml(data, directory, filename):
+def export_kml(modified_features, directory, filename):
     split_name = '{}Split'.format(filename)
     split_json = os.path.join(directory, '{}.geojson'.format(split_name))
     f = open(split_json, 'w')
-    json.dump(data, f)
+    json.dump(modified_features, f)
     f.close()
 
-    split_kml = os.path.join(directory, '{}.kml'.format(split_name))
+    split_kml = os.path.join(directory, '{}.kmz'.format(split_name))
     cmd = '{} -f "KML" {} {}'.format(OGR2OGR, split_kml, split_json)
     os.system(cmd)
+
+
+def calculate_offset(points, densified_linestring):
+    """https://stackoverflow.com/questions/7222382/get-lat-long-given-current-point-distance-and-bearing"""
+
+    offset_points = []
+    for point in points:
+        
+        lon = point['geometry']['coordinates'][0]
+        lat = point['geometry']['coordinates'][1]
+        vertex = [
+            v for v in densified_linestring.values()
+                if v['lat'] == lat and v['lon'] == lon][0]
+        offset_bearing = vertex['bearing2'] - 90
+        hh = geopy.Point(lat, lon)
+        offset = geodesic(feet=5).destination(hh, offset_bearing)
+        offset_lat = offset.latitude
+        offset_lon = offset.longitude
+
+        offset_point = deepcopy(point)
+        offset_point['geometry']['coordinates'][0] = offset_lon
+        offset_point['geometry']['coordinates'][1] = offset_lat
+        offset_point['properties']['Name'] = '{} OFFSET'.format(offset_point['properties']['Name'])
+        
+        remove = ['Coincident', 'Near1', 'Near2']
+        for r in remove:
+            point['properties'].pop(r, None)
+            offset_point['properties'].pop(r, None)
+        offset_points.append(offset_point)
+
+    return offset_points
+
+
+def insert_offsets(modified_features, points, offset_points):
+    for point in points:
+        modified_features['features'].append(point)
+    for offset in offset_points:
+        modified_features['features'].append(offset)
 
 
 if __name__ == '__main__':
@@ -330,8 +372,10 @@ if __name__ == '__main__':
     route_segments = get_route_segments(densified_linestring)
     find_excess_vertices(densified_linestring)
 
-    split_features = insert_polylines(route_segments, densified_linestring, polyline, data)
-    export_kml(split_features, directory, filename)
+    modified_features = insert_polylines(route_segments, densified_linestring, polyline, data)
+    offset_points = calculate_offset(points, densified_linestring)
+    insert_offsets(modified_features, points, offset_points)
+    export_kml(modified_features, directory, filename)
 
 
 
