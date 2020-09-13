@@ -1,7 +1,9 @@
-import collections, json, os, shutil, time
+import collections, copy, json, os, shutil, time
 from math import *
 import numpy as np
 from zipfile import ZipFile
+
+
 
 
 def get_file_properties(ge_file):
@@ -64,6 +66,16 @@ def extract_features(output_json):
     return points, polylines
 
 
+def remove_temp_files(directory):
+    """deletes all intermediate files"""
+
+    extensions = ['zip', 'json', 'kml']
+    for f in os.listdir(directory):
+        if f.split('.')[-1] in extensions:
+            temp_file = os.path.join(directory, f)
+            os.remove(temp_file)
+
+
 def enumerate_linestring(polyline):
     """Extracts vertex coordinates from polyline and assigns sequential IDs to
     each coordinate pair
@@ -71,7 +83,7 @@ def enumerate_linestring(polyline):
 
     coordinates = polyline['geometry']['coordinates']
     linestring = dict(enumerate(coordinates))
-    linestring = {k + 1: {'lon': v[0], 'lat': v[1]} for k, v in linestring.iteritems()}
+    linestring = {k + 1: {'lon': v[0], 'lat': v[1], 'HH': False} for k, v in linestring.iteritems()}
     return linestring
 
 
@@ -169,18 +181,28 @@ def check_topology(linestring, points, tolerance=0):
             if distance <= tolerance or (hh_lat == v_lat and hh_lon == v_lon):
                 coincident_pts += 1
                 point['properties']['Coincident'] = True
+                vertex['HH'] = True
             else:
                 point['properties']['Coincident'] = False
         
         distances = pt_distances.values()
         near1 = [k for k, v in pt_distances.iteritems() if v == min(distances)]
-        point['properties']['Near1'] = near1[0]
+        k1 = near1[0]
+        near1_lon = linestring[k1]['lon']
+        near1_lat = linestring[k1]['lat']
+        point['properties']['Near1'] = {
+            'vertex_id': k1, 'lon': near1_lon, 'lat': near1_lat}
         if len(near1) > 1:
-            point['properties']['Near2'] = near1[1]
+            k2 = near1[1]
+            near2_lon = linestring[k2]['lon']
+            near2_lat = linestring[k2]['lat']
         else:
             distances.remove(min(distances))
             near2 = [k for k, v in pt_distances.iteritems() if v == min(distances)]
-            point['properties']['Near2'] = near2[0]
+            k2 = near2[0]
+            near2_lon = linestring[k2]['lon']
+            near2_lat = linestring[k2]['lat']
+        point['properties']['Near2'] = {'vertex_id': k2, 'lon': near2_lon, 'lat': near2_lat}
 
     print "{} of {} handholes coincident with existing route vertex".format(coincident_pts, handholes)
     if handholes != coincident_pts:
@@ -188,6 +210,63 @@ def check_topology(linestring, points, tolerance=0):
     else:
         valid_topology = True
     return valid_topology
+
+
+def insert_handholes(points, linestring):
+    densified_linestring = copy.deepcopy(linestring)
+    for point in points:
+        properties = point['properties']
+        coords = point['geometry']['coordinates']
+
+        if not properties['Coincident']:
+            near1_id = properties['Near1']['vertex_id']
+            near2_id = properties['Near2']['vertex_id']
+            high_id = max([near1_id, near2_id])
+
+            for k, v in linestring.iteritems():
+                if k >= high_id:
+                    temp_id = k + 1.1
+                    densified_linestring[temp_id] = v
+                    densified_linestring[int(temp_id)] = v
+                    densified_linestring.pop(temp_id, None)
+            for hh in points:
+                near1 = hh['properties']['Near1']
+                near2 = hh['properties']['Near2']
+                if near1['vertex_id'] >= high_id:
+                    near1['vertex_id'] = near1['vertex_id'] + 1
+                if near2['vertex_id'] >= high_id:
+                    near2['vertex_id'] = near2['vertex_id'] + 1
+
+            densified_linestring[high_id] = {
+                'HH': True, 'lon': coords[0], 'lat': coords[1]}
+            linestring = copy.deepcopy(densified_linestring)
+
+    return densified_linestring
+
+        
+def get_route_segments(densified_linestring):
+    """returns ranges of vertices between handholes that define route segments"""
+
+    end_pt = max(densified_linestring.keys())
+    hh_ids = [k for k, v in densified_linestring.iteritems() if v['HH']]
+    route_segments = {1: None, 'last': None}
+
+    first_hh = min(hh_ids)
+    route_segments[1] = (1, first_hh + 1)
+    last_hh = max(hh_ids)
+    route_segments['last'] = (last_hh, end_pt + 1)
+
+    segment = 2
+    for hh_id in hh_ids:
+        if hh_id != last_hh:
+            remaining_hh = [hh for hh in hh_ids if hh > hh_id]
+            next_hh = min(remaining_hh)
+            route_segments[segment] = (hh_id, next_hh + 1)
+            segment += 1
+
+    seg_count = len(route_segments)
+    route_segments[seg_count] = route_segments.pop('last')
+    return route_segments
 
 
 if __name__ == '__main__':
@@ -202,8 +281,13 @@ if __name__ == '__main__':
     
     output_json = kml_to_json(kml)
     points, polyline = extract_features(output_json)
+    remove_temp_files(directory)
+
     linestring = enumerate_linestring(polyline)
     valid_topology = check_topology(linestring, points)
+    densified_linestring = insert_handholes(points, linestring)
+    route_segments = get_route_segments(densified_linestring)
+
 
 
 
